@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+
+# 凭据和调试碎屑留在自己电脑上。
+.env
+.env.*
+!.env.example
+*.log
+
+# 设计草稿与本地验收笔记先留在抽屉里。
+/design/
+/design-qa.md
+/iteration-qa.md

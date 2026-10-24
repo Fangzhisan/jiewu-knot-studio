@@ -1,0 +1,174 @@
+import * as THREE from 'three'
+import type { LessonSupport } from './lessons/types'
+
+const SLOT_COUNT = 32
+const TAU = Math.PI * 2
+const SLOT_DEPTH = .14
+const SLOT_HALF_WIDTH = .028
+const ATLAS_SIZE = 2048
+const FRONT = new THREE.Vector3(0, 0, 1)
+const angleOf = (slot: number) => Math.PI / 2 - TAU * (slot - .5) / SLOT_COUNT
+
+/** A real annulus with 32 open, constant-width radial notches, in unit XY. */
+function diskGeometry(innerRatio: number): THREE.ExtrudeGeometry {
+  const shape = new THREE.Shape()
+  const mouth = Math.sqrt(1 - SLOT_HALF_WIDTH ** 2)
+  const halfAngle = Math.asin(SLOT_HALF_WIDTH)
+  const first = angleOf(1)
+  const local = (angle: number, radial: number, tangent: number): [number, number] => [
+    Math.cos(angle) * radial - Math.sin(angle) * tangent,
+    Math.sin(angle) * radial + Math.cos(angle) * tangent,
+  ]
+  shape.moveTo(...local(first, mouth, -SLOT_HALF_WIDTH))
+  // Traverse counterclockwise. The physical numbering itself is clockwise.
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const angle = first + TAU * i / SLOT_COUNT
+    shape.lineTo(...local(angle, 1 - SLOT_DEPTH, -SLOT_HALF_WIDTH))
+    shape.lineTo(...local(angle, 1 - SLOT_DEPTH, SLOT_HALF_WIDTH))
+    shape.lineTo(...local(angle, mouth, SLOT_HALF_WIDTH))
+    const end = angle + TAU / SLOT_COUNT - halfAngle
+    for (let j = 1; j <= 8; j++) {
+      const a = angle + halfAngle + (end - angle - halfAngle) * j / 8
+      shape.lineTo(Math.cos(a), Math.sin(a))
+    }
+  }
+  shape.closePath()
+  const hole = new THREE.Path()
+  hole.absarc(0, 0, innerRatio, 0, TAU, true)
+  shape.holes.push(hole)
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: 1, steps: 1, bevelEnabled: false, curveSegments: 64 })
+  geometry.translate(0, 0, -.5)
+  const positions = geometry.getAttribute('position')
+  const normals = geometry.getAttribute('normal')
+  const uv = geometry.getAttribute('uv')
+  // Extrusion's default world UVs are not normalized. The atlas is one image
+  // across the +Z face; the unprinted back and slot/hole walls use material 1.
+  for (let i = 0; i < positions.count; i++) uv.setXY(i, (positions.getX(i) + 1) / 2, (positions.getY(i) + 1) / 2)
+  geometry.clearGroups()
+  let start = 0, material = normals.getZ(0) > .5 ? 0 : 1
+  for (let i = 3; i < positions.count; i += 3) {
+    const next = normals.getZ(i) > .5 ? 0 : 1
+    if (next !== material) { geometry.addGroup(start, i - start, material); start = i; material = next }
+  }
+  geometry.addGroup(start, positions.count - start, material)
+  geometry.computeBoundingBox()
+  geometry.computeBoundingSphere()
+  return geometry
+}
+
+/** Cached 32-slot kumihimo disk. +Z is the printed front; rotation is local CCW. */
+export class BraidingDisk {
+  readonly group = new THREE.Group()
+  private readonly canvas: HTMLCanvasElement
+  private readonly context: CanvasRenderingContext2D
+  private readonly texture: THREE.CanvasTexture
+  private readonly face: THREE.MeshStandardMaterial
+  private readonly edge: THREE.MeshStandardMaterial
+  private readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial[]>
+  private readonly axis = new THREE.Vector3()
+  private readonly spin = new THREE.Quaternion()
+  private innerRatio = .28
+  private atlasKey = ''
+  private disposed = false
+
+  constructor() {
+    this.group.name = 'BraidingDisk'
+    this.group.visible = false
+    this.canvas = document.createElement('canvas')
+    this.canvas.width = this.canvas.height = ATLAS_SIZE
+    const context = this.canvas.getContext('2d')
+    if (!context) throw new Error('BraidingDisk requires a 2D canvas context')
+    this.context = context
+    this.texture = new THREE.CanvasTexture(this.canvas)
+    this.texture.colorSpace = THREE.SRGBColorSpace
+    this.texture.anisotropy = 4
+    this.face = new THREE.MeshStandardMaterial({ map: this.texture, color: '#f7f7f2', roughness: .88 })
+    this.edge = new THREE.MeshStandardMaterial({ color: '#e6e7e1', roughness: .94 })
+    this.mesh = new THREE.Mesh(diskGeometry(this.innerRatio), [this.face, this.edge])
+    this.mesh.name = '32-slot disk with open centre'
+    this.mesh.castShadow = this.mesh.receiveShadow = true
+    this.group.add(this.mesh)
+  }
+
+  private paint(slots: number[]) {
+    const ctx = this.context, centre = ATLAS_SIZE / 2, scale = centre
+    const point = (r: number, a: number): [number, number] => [centre + r * Math.cos(a) * scale, centre - r * Math.sin(a) * scale]
+    ctx.clearRect(0, 0, ATLAS_SIZE, ATLAS_SIZE)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, ATLAS_SIZE, ATLAS_SIZE)
+    const textRadius = Math.max(.775, (this.innerRatio + 1 - SLOT_DEPTH) / 2)
+    const textSize = Math.min(.055, (1 - SLOT_DEPTH - this.innerRatio) * .48) * scale
+    const highlightInner = Math.max(this.innerRatio + .012, textRadius - .065)
+    for (const slot of slots) {
+      const angle = angleOf(slot), half = TAU / SLOT_COUNT * .40
+      ctx.beginPath()
+      ctx.moveTo(...point(highlightInner, angle - half))
+      ctx.lineTo(...point(.995, angle - half))
+      ctx.arc(centre, centre, .995 * scale, -angle + half, -angle - half, true)
+      ctx.lineTo(...point(highlightInner, angle + half))
+      ctx.arc(centre, centre, highlightInner * scale, -angle - half, -angle + half)
+      ctx.closePath()
+      ctx.fillStyle = '#d6e7da'
+      ctx.fill()
+    }
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#272c2a'
+    ctx.font = `600 ${textSize}px system-ui, sans-serif`
+    for (let slot = 1; slot <= SLOT_COUNT; slot++) ctx.fillText(String(slot), ...point(textRadius, angleOf(slot)))
+    // Four neutral quarter markers aid the rotation steps without extra sprites.
+    if (this.innerRatio < .58) for (let i = 0; i < 4; i++) {
+      ctx.beginPath()
+      ctx.arc(...point(.63, Math.PI / 2 - i * Math.PI / 2), .009 * scale, 0, TAU)
+      ctx.fill()
+    }
+    ctx.beginPath()
+    ctx.arc(centre, centre, (this.innerRatio + .009) * scale, 0, TAU)
+    ctx.strokeStyle = '#c8cbc4'
+    ctx.lineWidth = 2
+    ctx.stroke()
+    this.texture.needsUpdate = true
+  }
+
+  update(support: LessonSupport) {
+    if (this.disposed) return
+    this.group.visible = support.kind === 'braiding-disk'
+    if (!this.group.visible) return
+    const radius = Number.isFinite(support.radius) && support.radius > 0 ? support.radius : 1
+    const thickness = Number.isFinite(support.length) && support.length > 0 ? support.length : .08
+    const requestedInner = support.innerRadius ?? radius * .28
+    // Leave a continuous band below the notch floors even for malformed inputs.
+    const ratio = Math.max(.03, Math.min(.80, Number.isFinite(requestedInner) ? requestedInner / radius : .28))
+    if (Math.abs(ratio - this.innerRatio) > 1e-9) {
+      const previous = this.mesh.geometry
+      this.mesh.geometry = diskGeometry(ratio)
+      previous.dispose()
+      this.innerRatio = ratio
+    }
+    this.group.position.set(...support.position.map(value => Number.isFinite(value) ? value : 0) as [number, number, number])
+    this.group.scale.set(radius, radius, thickness)
+    this.axis.fromArray(support.axis)
+    if (![this.axis.x, this.axis.y, this.axis.z].every(Number.isFinite) || this.axis.lengthSq() < 1e-12) this.axis.copy(FRONT)
+    this.axis.normalize()
+    this.group.quaternion.setFromUnitVectors(FRONT, this.axis)
+    this.spin.setFromAxisAngle(FRONT, Number.isFinite(support.rotation) ? support.rotation! : 0)
+    this.group.quaternion.multiply(this.spin)
+    this.face.color.set(support.color ?? '#f7f7f2')
+    this.edge.color.copy(this.face.color).multiplyScalar(.92)
+    const slots = [...new Set(support.activeSlots?.filter(slot => Number.isInteger(slot) && slot >= 1 && slot <= SLOT_COUNT) ?? [])].sort((a, b) => a - b)
+    const key = `${this.innerRatio}:${slots.join(',')}`
+    if (key !== this.atlasKey) { this.paint(slots); this.atlasKey = key }
+  }
+
+  dispose() {
+    if (this.disposed) return
+    this.disposed = true
+    this.group.visible = false
+    this.mesh.geometry.dispose()
+    this.face.dispose()
+    this.edge.dispose()
+    this.texture.dispose()
+    this.group.clear()
+    this.canvas.width = this.canvas.height = 1
+  }
+}

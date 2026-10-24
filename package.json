@@ -1,0 +1,36 @@
+{
+  "name": "jiewu-knot-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5187 --strictPort",
+    "build": "npm run check:projections && npm run check:guides && vue-tsc --noEmit && vite build",
+    "generate:projections": "node scripts/generate-course-projections.mjs",
+    "check:projections": "node scripts/generate-course-projections.mjs --check",
+    "check:courses": "node scripts/check-courses.mjs",
+    "check:end-labels": "node scripts/check-end-labels.mjs",
+    "check:bead-caps": "node scripts/check-bead-caps.mjs",
+    "preview": "vite preview --host 127.0.0.1 --port 5187 --strictPort",
+    "check:guides": "node scripts/check-guides.mjs"
+  },
+  "dependencies": {
+    "vue": "3.5.44",
+    "three": "0.186.1",
+    "@lucide/vue": "1.61.0"
+  },
+  "devDependencies": {
+    "vite": "8.3.5",
+    "@vitejs/plugin-vue": "6.0.10",
+    "typescript": "5.9.3",
+    "vue-tsc": "3.3.13",
+    "@types/three": "0.186.0"
+  },
+  "description": "结物 🪢 一个学绳结、编织和串珠的小站。",
+  "license": "MIT",
+  "author": "Fangzhisan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fangzhisan/jiewu-knot-studio.git"
+  }
+}

@@ -34,7 +34,7 @@ jobs:
       - name: 检查代码格式与几何算法
         run: |
           npm run format:check
-          node --test scripts/check-knot-geometry.test.mjs scripts/bead-project-geometry.test.mjs
+          node --test scripts/check-knot-geometry.test.mjs scripts/bead-project-geometry.test.mjs scripts/knot-review-fingerprint.test.mjs
       - name: 检查课程目录与已复核版本
         run: |
           npm run check:knot-atlas

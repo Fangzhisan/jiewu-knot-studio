@@ -1,55 +1,139 @@
-import type { Course, LessonState, LessonStep, Vec3 } from './types'
+import type { Course, LessonState, LessonStep, Vec3 } from './types';
 
-// Single-cord loops with pre-authored construction routes and continuous
-// dressing. Every state is computed directly from progress, including rewind.
-const RADIUS = 0.06
-const TIMES = [0, 0.14, 0.38, 0.62, 0.82, 1] as const
-const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0))
-const ease = (v: number) => { const t = clamp(v); return t * t * (3 - 2 * t) }
-const mix = (a: number, b: number, t: number) => a + (b - a) * t
-const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i]!, t)) as Vec3
-const distance = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
-type Path = { points: Vec3[]; lengths: number[]; total: number; marks: number[] }
+// 单绳的成圈与收紧都沿预先编排的路线进行。
+// 当前形状直接由进度算出，回拖进度也走同一条路。
+const RADIUS = 0.06;
+/** 步骤起点，末尾的 1 用于计算最后一步时长。 */
+const TIMES = [0, 0.14, 0.38, 0.62, 0.82, 1] as const;
+/** 限制进度范围，无效值回到起点。 */
+const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
+/** 用平滑缓动衔接动作。 */
+const ease = (v: number) => {
+  const t = clamp(v);
+
+  return t * t * (3 - 2 * t);
+};
+
+/** 按比例插值。 */
+const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+/** 插值三维位置。 */
+const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i]!, t)) as Vec3;
+/** 计算两点距离。 */
+const distance = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+/** 绳路与弧长；marks 保存教学分界。 */
+type Path = { points: Vec3[]; lengths: number[]; total: number; marks: number[] };
+
+/** 计算路径弧长，保留教学分界。 */
 function pathOf(points: Vec3[], marks: number[] = []): Path {
-  const lengths = [0]
-  for (let i = 1; i < points.length; i++) lengths.push(lengths[i - 1]! + distance(points[i - 1]!, points[i]!))
-  return { points, lengths, total: lengths.at(-1)!, marks }
+  const lengths = [0];
+
+  for (let i = 1; i < points.length; i++) {
+    lengths.push(lengths[i - 1]! + distance(points[i - 1]!, points[i]!));
+  }
+
+  return { points, lengths, total: lengths.at(-1)!, marks };
 }
 
-function spline(controls: Vec3[], transform: (p: Vec3) => Vec3 = p => p): Path {
-  const first = controls[0]!, last = controls.at(-1)!
-  const padded = [first, first, ...controls, last, last]
-  const points: Vec3[] = [transform([...first])], marks: number[] = []
-  let arc = 0
+/** 平滑控制点，并记录各段弧长。 */
+function spline(controls: Vec3[], transform: (p: Vec3) => Vec3 = (p) => p): Path {
+  const first = controls[0]!,
+    last = controls.at(-1)!;
+
+  const padded = [first, first, ...controls, last, last];
+  const points: Vec3[] = [transform([...first])],
+    marks: number[] = [];
+
+  let arc = 0;
+
   for (let span = 0; span < padded.length - 3; span++) {
     for (let i = 1; i <= 36; i++) {
-      const t = i / 36, t2 = t * t, t3 = t2 * t
-      const w = [(1 - t) ** 3 / 6, (4 - 6 * t2 + 3 * t3) / 6, (1 + 3 * t + 3 * t2 - 3 * t3) / 6, t3 / 6]
-      const point = transform([0, 1, 2].map(a => w.reduce((sum, weight, k) => sum + padded[span + k]![a]! * weight, 0)) as Vec3)
-      const step = distance(points.at(-1)!, point)
-      if (step > 1e-10) { points.push(point); arc += step }
+      const t = i / 36,
+        t2 = t * t,
+        t3 = t2 * t;
+
+      const w = [
+        (1 - t) ** 3 / 6,
+        (4 - 6 * t2 + 3 * t3) / 6,
+        (1 + 3 * t + 3 * t2 - 3 * t3) / 6,
+        t3 / 6,
+      ];
+
+      const point = transform(
+        [0, 1, 2].map((a) =>
+          w.reduce((sum, weight, k) => sum + padded[span + k]![a]! * weight, 0),
+        ) as Vec3,
+      );
+
+      const step = distance(points.at(-1)!, point);
+
+      if (step > 1e-10) {
+        points.push(point);
+        arc += step;
+      }
     }
-    marks.push(arc)
+
+    marks.push(arc);
   }
-  return pathOf(points, marks)
+
+  return pathOf(points, marks);
 }
 
+/** 按弧长二分定位，再插值取点。 */
 function at(path: Path, offset: number): Vec3 {
-  const s = Math.max(0, Math.min(path.total, offset))
-  let left = 1, right = path.points.length - 1
-  while (left < right) { const middle = (left + right) >> 1; if (path.lengths[middle]! < s) left = middle + 1; else right = middle }
-  return lerp(path.points[left - 1]!, path.points[left]!, (s - path.lengths[left - 1]!) / (path.lengths[left]! - path.lengths[left - 1]! || 1))
+  const s = Math.max(0, Math.min(path.total, offset));
+  let left = 1,
+    right = path.points.length - 1;
+
+  while (left < right) {
+    const middle = (left + right) >> 1;
+
+    if (path.lengths[middle]! < s) {
+      left = middle + 1;
+    } else {
+      right = middle;
+    }
+  }
+
+  return lerp(
+    path.points[left - 1]!,
+    path.points[left]!,
+    (s - path.lengths[left - 1]!) / (path.lengths[left]! - path.lengths[left - 1]! || 1),
+  );
 }
+
+/** 按弧长截取并均匀采样可见绳段。 */
 function prefix(path: Path, amount: number): Vec3[] {
-  const length = Math.max(0.25, Math.min(path.total, amount)), divisions = Math.max(16, Math.ceil(length / 0.018))
-  return Array.from({ length: divisions + 1 }, (_, i) => at(path, length * i / divisions))
+  const length = Math.max(0.25, Math.min(path.total, amount)),
+    divisions = Math.max(16, Math.ceil(length / 0.018));
+
+  return Array.from({ length: divisions + 1 }, (_, i) => at(path, (length * i) / divisions));
 }
-function stepAt(p: number) { for (let i = 4; i >= 0; i--) if (p >= TIMES[i]!) return i; return 0 }
-function makeSteps(titles: string[], text: string[]): LessonStep[] { return titles.map((title, i) => ({ time: TIMES[i]!, title, instruction: text[i]! })) }
-function revealed(p: number, cuts: number[]) { const i = stepAt(p); return mix(cuts[i]!, cuts[i + 1]!, ease((p - TIMES[i]!) / (TIMES[i + 1]! - TIMES[i]!))) }
 
+/** 查找当前步骤。 */
+function stepAt(p: number) {
+  for (let i = 4; i >= 0; i--) {
+    if (p >= TIMES[i]!) {
+      return i;
+    }
+  }
 
+  return 0;
+}
+
+/** 配好每一步的时间和说明。 */
+function makeSteps(titles: string[], text: string[]): LessonStep[] {
+  return titles.map((title, i) => ({ time: TIMES[i]!, title, instruction: text[i]! }));
+}
+
+/** 按步骤分界推进可见绳长。 */
+function revealed(p: number, cuts: number[]) {
+  const i = stepAt(p);
+
+  return mix(cuts[i]!, cuts[i + 1]!, ease((p - TIMES[i]!) / (TIMES[i + 1]! - TIMES[i]!)));
+}
+
+/** 称人结的展开路线。 */
 const BOWLINE_LOOSE: Vec3[] = [
   [0.0, 2.7, 0.0],
   [0.0, 2.1, 0.0],
@@ -85,8 +169,9 @@ const BOWLINE_LOOSE: Vec3[] = [
   [-0.25, -0.65, -0.3],
   [-0.25, -1.3, -0.1],
   [-0.25, -1.8, 0.0],
-]
+];
 
+/** 称人结收紧坐标，大圈仍留开口。 */
 const BOWLINE_TIGHT: Vec3[] = [
   [0.0, 2.7, 0.0],
   [0.0, 2.1, 0.0],
@@ -105,9 +190,9 @@ const BOWLINE_TIGHT: Vec3[] = [
   [-0.0293603, -0.7120254, -0.1365434],
   [0.7828119, -1.3356439, -0.0004094],
   [0.5957649, -1.8571838, -0.0002659],
-  [-2.06e-05, -2.1355944, -1.39e-05],
-  [-0.6335721, -1.8570257, -6.19e-05],
-  [-0.7831065, -1.3352394, 3.96e-05],
+  [-2.06e-5, -2.1355944, -1.39e-5],
+  [-0.6335721, -1.8570257, -6.19e-5],
+  [-0.7831065, -1.3352394, 3.96e-5],
   [-0.2636468, -0.8086438, -0.03105],
   [-0.0444136, -0.5342614, 0.026758],
   [-0.150101, -0.3941923, -0.0502903],
@@ -122,22 +207,44 @@ const BOWLINE_TIGHT: Vec3[] = [
   [0.0077664, -0.5968996, 0.0853896],
   [-0.0669532, -0.8318937, 0.0310275],
   [-0.18, -1.15, 0.0],
-]
+];
 
-const bowlineLoose = spline(BOWLINE_LOOSE)
+const bowlineLoose = spline(BOWLINE_LOOSE);
+
+/** 展开称人结，收紧时保留固定大圈。 */
 function bowlineState(progress: number): LessonState {
-  const p = clamp(progress), tension = ease((p - .82) / .18)
-  const path = tension > 0 ? spline(BOWLINE_LOOSE.map((point, i) => lerp(point, BOWLINE_TIGHT[i]!, tension))) : bowlineLoose
-  const cuts = [.6, bowlineLoose.marks[4]!, bowlineLoose.marks[14]!, bowlineLoose.marks[26]!, bowlineLoose.total, bowlineLoose.total]
-  const points = prefix(path, tension > 0 ? path.total : revealed(p, cuts))
-  return { points, tip: [...points.at(-1)!], checkpoint: stepAt(p), radius: RADIUS, color: '#326558', endCaps: { start: '1B', end: '1A' } }
+  const p = clamp(progress),
+    tension = ease((p - 0.82) / 0.18);
+
+  const path =
+    tension > 0
+      ? spline(BOWLINE_LOOSE.map((point, i) => lerp(point, BOWLINE_TIGHT[i]!, tension)))
+      : bowlineLoose;
+
+  const cuts = [
+    0.6,
+    bowlineLoose.marks[4]!,
+    bowlineLoose.marks[14]!,
+    bowlineLoose.marks[26]!,
+    bowlineLoose.total,
+    bowlineLoose.total,
+  ];
+
+  const points = prefix(path, tension > 0 ? path.total : revealed(p, cuts));
+
+  return {
+    points,
+    tip: [...points.at(-1)!],
+    checkpoint: stepAt(p),
+    radius: RADIUS,
+    color: '#326558',
+    endCaps: { start: '1B', end: '1A' },
+  };
 }
 
-
-// Chinese button / single-cord diamond: Carrick base, followed by two
-// same-direction outer wraps and two rear-to-front centre tucks. The wide
-// bight joins the two standing parts: this remains ONE cord with TWO ends.
-// The constant .045 radius represents finer braiding cord, including dressing.
+// 单绳纽扣结先做双钱底结，再让两端同向绕外侧，各自从背后穿出中心孔。
+// 宽绳弯连接两侧固定段：整条路线始终只是一根绳、两个端点。
+// 这里用较细的编绳，半径固定为 .045，收紧时也不改变绳径。
 
 const DIAMOND_LOOSE: Vec3[] = [
   [2.7, 0.4, 0.0],
@@ -338,8 +445,9 @@ const DIAMOND_LOOSE: Vec3[] = [
   [0.6, -0.35, 0.55],
   [1.5, -0.4, 0.25],
   [2.7, -0.4, 0.0],
-]
+];
 
+/** 纽扣结初步收紧的坐标。 */
 const DIAMOND_TIGHT: Vec3[] = [
   [2.7, 0.065, 0.0],
   [1.4974169, 0.0640382, -0.0193634],
@@ -437,11 +545,11 @@ const DIAMOND_TIGHT: Vec3[] = [
   [-0.3752855, -0.2511552, 0.0179575],
   [-0.4067768, -0.2657464, 0.0062159],
   [-1.0010766, -0.6460556, -0.000482],
-  [-1.7993231, -0.8462468, 1.12e-05],
-  [-2.4964955, -0.5466997, -7e-07],
-  [-2.6951664, 5.17e-05, -2e-07],
-  [-2.4963877, 0.6466528, -3e-06],
-  [-1.7992055, 0.8965438, -5.61e-05],
+  [-1.7993231, -0.8462468, 1.12e-5],
+  [-2.4964955, -0.5466997, -7e-7],
+  [-2.6951664, 5.17e-5, -2e-7],
+  [-2.4963877, 0.6466528, -3e-6],
+  [-1.7992055, 0.8965438, -5.61e-5],
   [-1.0001467, 0.7486735, -0.0002019],
   [-0.4127133, 0.433504, -0.0246885],
   [0.5450135, 0.5131198, -0.1704611],
@@ -539,8 +647,9 @@ const DIAMOND_TIGHT: Vec3[] = [
   [0.6911648, -0.0616554, -0.0460358],
   [1.4982334, -0.0642803, -0.0139118],
   [2.7, -0.065, 0.0],
-]
+];
 
+/** 纽扣结最后整理的坐标。 */
 const DIAMOND_DRESSED: Vec3[] = [
   [2.7, 0.065, 0.0],
   [1.4970524, 0.064697, -0.0176978],
@@ -636,12 +745,12 @@ const DIAMOND_DRESSED: Vec3[] = [
   [-0.2225526, -0.1479273, 0.021468],
   [-0.2368508, -0.1500578, 0.0171404],
   [-0.2691158, -0.1568154, 0.0012106],
-  [-0.407786, -0.2601993, -2.26e-05],
+  [-0.407786, -0.2601993, -2.26e-5],
   [-1.0048826, -0.6315374, -0.0006125],
-  [-1.7987986, -0.8433049, 9.8e-06],
-  [-2.4937615, -0.5441117, -1.7e-06],
-  [-2.6913976, 9.31e-05, -5e-07],
-  [-2.4935715, 0.6440484, -5.5e-06],
+  [-1.7987986, -0.8433049, 9.8e-6],
+  [-2.4937615, -0.5441117, -1.7e-6],
+  [-2.6913976, 9.31e-5, -5e-7],
+  [-2.4935715, 0.6440484, -5.5e-6],
   [-1.7985796, 0.8938627, -0.0001015],
   [-1.000241, 0.7478522, -0.0004449],
   [-0.4161408, 0.4349827, -0.0236561],
@@ -740,51 +849,114 @@ const DIAMOND_DRESSED: Vec3[] = [
   [0.6671345, -0.0318247, -0.0594182],
   [1.4983977, -0.0649591, -0.0114322],
   [2.7, -0.065, 0.0],
-]
+];
 
-const diamondLoose = spline(DIAMOND_LOOSE)
+const diamondLoose = spline(DIAMOND_LOOSE);
+
+/** 按弧长截取一段路线。 */
 function range(path: Path, start: number, end: number): Vec3[] {
-  const length = end - start, divisions = Math.max(16, Math.ceil(length / .016))
-  return Array.from({ length: divisions + 1 }, (_, i) => at(path, start + length * i / divisions))
+  const length = end - start,
+    divisions = Math.max(16, Math.ceil(length / 0.016));
+
+  return Array.from({ length: divisions + 1 }, (_, i) =>
+    at(path, start + (length * i) / divisions),
+  );
 }
+
+/** 纽扣结从中间展开，再分两段收紧。 */
 function diamondState(progress: number): LessonState {
-  const p = clamp(progress), tension = ease((p - .82) / .12), dressing = ease((p - .94) / .06)
-  const path = dressing > 0
-    ? spline(DIAMOND_TIGHT.map((point, i) => lerp(point, DIAMOND_DRESSED[i]!, dressing)))
-    : tension > 0 ? spline(DIAMOND_LOOSE.map((point, i) => lerp(point, DIAMOND_TIGHT[i]!, tension))) : diamondLoose
-  const left = diamondLoose.marks[94]!, right = diamondLoose.marks[103]!
-  const leftBase = left - diamondLoose.marks[21]!, rightBase = diamondLoose.marks[176]! - right
-  const growA = revealed(p, [.4, leftBase, leftBase, left, left, left])
-  const growB = revealed(p, [.4, .4, rightBase, rightBase, diamondLoose.total - right, diamondLoose.total - right])
-  const points = range(path, tension > 0 ? 0 : left - growA, tension > 0 ? path.total : right + growB)
-  return { points, tip: [...points.at(-1)!], checkpoint: stepAt(p), radius: .045, color: '#327568', endCaps: { start: '1A', end: '1B' } }
+  const p = clamp(progress),
+    tension = ease((p - 0.82) / 0.12),
+    dressing = ease((p - 0.94) / 0.06);
+
+  const path =
+    dressing > 0
+      ? spline(DIAMOND_TIGHT.map((point, i) => lerp(point, DIAMOND_DRESSED[i]!, dressing)))
+      : tension > 0
+        ? spline(DIAMOND_LOOSE.map((point, i) => lerp(point, DIAMOND_TIGHT[i]!, tension)))
+        : diamondLoose;
+
+  const left = diamondLoose.marks[94]!,
+    right = diamondLoose.marks[103]!;
+
+  const leftBase = left - diamondLoose.marks[21]!,
+    rightBase = diamondLoose.marks[176]! - right;
+
+  const growA = revealed(p, [0.4, leftBase, leftBase, left, left, left]);
+  const growB = revealed(p, [
+    0.4,
+    0.4,
+    rightBase,
+    rightBase,
+    diamondLoose.total - right,
+    diamondLoose.total - right,
+  ]);
+
+  const points = range(
+    path,
+    tension > 0 ? 0 : left - growA,
+    tension > 0 ? path.total : right + growB,
+  );
+
+  return {
+    points,
+    tip: [...points.at(-1)!],
+    checkpoint: stepAt(p),
+    radius: 0.045,
+    color: '#327568',
+    endCaps: { start: '1A', end: '1B' },
+  };
 }
 
 export const LOOP_DECORATIVE_COURSES: Course[] = [
+  /** 称人结区分负责锁定的小圈和用于套挂的大圈，绳尾留在大圈内侧。 */
   {
-    id: 'bowline', category: 'knots', name: '称人结', title: '穿出小圈，绕过主绳，再从原圈穿回',
+    id: 'bowline',
+    category: 'knots',
+    name: '称人结',
+    title: '穿出小圈，绕过主绳，再从原圈穿回',
     description: '先打一个小圈，再用工作端绕住主绳，形成大小固定的大绳圈。成品绳尾留在大圈内侧。',
-    material: '一根圆绳', materialNote: '大圈用于辨认固定绳圈结构，小圈与绕主绳的绳弯负责锁住它。本课仅作工艺结构教学。', duration: 32, initialProgress: .62,
-    steps: makeSteps(['预留绳圈长度', '打出一个小圈', '穿出并绕过主绳', '从原来的小圈穿回', '收紧称人结'], [
-      '从固定段 1B 向工作端 1A 留出足够长度，用来形成大绳圈与最后的绳尾。',
-      '把绳子绕成一个有上下交叉的小圈，保留圈口，准备让工作端穿入。',
-      '先留出大绳圈，让工作端从小圈内穿出，再绕到主绳后方。',
-      '工作端从原来的小圈穿回。检查它绕的是主绳，绳尾留在大圈里面。',
-      '固定大圈并拉主绳，整理小圈与绕主绳的绳弯使其贴合。结芯收紧，大绳圈保持可辨的开口。',
-    ]), source: 'https://www.animatedknots.com/bowline-knot', sourceName: 'Animated Knots · Bowline',
+    material: '一根圆绳',
+    materialNote: '大圈用于辨认固定绳圈结构，小圈与绕主绳的绳弯负责锁住它。本课仅作工艺结构教学。',
+    duration: 32,
+    initialProgress: 0.62,
+    steps: makeSteps(
+      ['预留绳圈长度', '打出一个小圈', '穿出并绕过主绳', '从原来的小圈穿回', '收紧称人结'],
+      [
+        '从固定段 1B 向工作端 1A 留出足够长度，用来形成大绳圈与最后的绳尾。',
+        '把绳子绕成一个有上下交叉的小圈，保留圈口，准备让工作端穿入。',
+        '先留出大绳圈，让工作端从小圈内穿出，再绕到主绳后方。',
+        '工作端从原来的小圈穿回。检查它绕的是主绳，绳尾留在大圈里面。',
+        '固定大圈并拉主绳，整理小圈与绕主绳的绳弯使其贴合。结芯收紧，大绳圈保持可辨的开口。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/bowline-knot',
+    sourceName: 'Animated Knots · Bowline',
     getState: bowlineState,
   },
+  /** 单绳纽扣结由双钱底结起步，两端同向外绕后从中心孔穿出。 */
   {
-    id: 'diamond-lanyard', category: 'knots', name: '单绳纽扣结', title: '双钱底结的两端绕外侧，再从中心穿出',
+    id: 'diamond-lanyard',
+    category: 'knots',
+    name: '单绳纽扣结',
+    title: '双钱底结的两端绕外侧，再从中心穿出',
     description: '一根绳的中段留作绳圈，两端交织后从中央穿出，整理成紧实的立体纽扣结。也称钻石结。',
-    material: '一根细编绳', materialNote: '两端属于同一根绳。中间的大圈保留作挂环，收紧时逐段调整结体余线。', duration: 38, initialProgress: .62,
-    steps: makeSteps(['留出中间绳圈', '交织双钱底结', '第一端绕外侧穿中心', '第二端同法穿中心', '收紧纽扣结'], [
-      '把一根绳的中段留成绳圈，用工作端 1A 打出第一个圈，另一端 1B 留在旁边。',
-      '让 1B 与第一个圈交替上下交织，完成展开的双钱底结。中央留下一个菱形穿口。',
-      '让 1A 继续绕到对面的外侧，经过绳圈外侧后，从结的背面向上穿过中央孔。',
-      '让 1B 沿同一旋转方向绕到另一侧，再从背面穿过中央孔，与 1A 并排伸出。',
-      '一边拉两端和中间绳圈，一边逐段整理余量。交织绳弯合拢成纽扣形，保留外部挂环。',
-    ]), source: 'https://www.animatedknots.com/lanyard-knot', sourceName: 'Animated Knots · Lanyard / Diamond Knot',
+    material: '一根细编绳',
+    materialNote: '两端属于同一根绳。中间的大圈保留作挂环，收紧时逐段调整结体余线。',
+    duration: 38,
+    initialProgress: 0.62,
+    steps: makeSteps(
+      ['留出中间绳圈', '交织双钱底结', '第一端绕外侧穿中心', '第二端同法穿中心', '收紧纽扣结'],
+      [
+        '把一根绳的中段留成绳圈，用工作端 1A 打出第一个圈，另一端 1B 留在旁边。',
+        '让 1B 与第一个圈交替上下交织，完成展开的双钱底结。中央留下一个菱形穿口。',
+        '让 1A 继续绕到对面的外侧，经过绳圈外侧后，从结的背面向上穿过中央孔。',
+        '让 1B 沿同一旋转方向绕到另一侧，再从背面穿过中央孔，与 1A 并排伸出。',
+        '一边拉两端和中间绳圈，一边逐段整理余量。交织绳弯合拢成纽扣形，保留外部挂环。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/lanyard-knot',
+    sourceName: 'Animated Knots · Lanyard / Diamond Knot',
     getState: diamondState,
   },
-]
+];

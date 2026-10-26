@@ -1,0 +1,7 @@
+node_modules/
+dist/
+package-lock.json
+
+# 坐标载荷与投影交给生成脚本维护。
+src/lessons/data/
+src/lessons/generated/

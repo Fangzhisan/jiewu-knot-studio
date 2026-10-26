@@ -1,108 +1,239 @@
-import type { Course, LessonState, LessonStep, Vec3 } from './types'
+import type { Course, LessonState, LessonStep, Vec3 } from './types';
 
-// These lessons lay out a checked route and then dress its knot core with an
-// authored, reversible deformation. No accumulated physics state is used.
-const RADIUS = 0.06
-const TIMES = [0, 0.14, 0.40, 0.66, 0.82, 1] as const
-const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0))
-const ease = (n: number) => { const t = clamp(n); return t * t * (3 - 2 * t) }
-const mix = (a: number, b: number, t: number) => a + (b - a) * t
-const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i], t)) as Vec3
-const sub = (a: Vec3, b: Vec3): Vec3 => a.map((v, i) => v - b[i]) as Vec3
-const dot = (a: Vec3, b: Vec3) => a.reduce((sum, v, i) => sum + v * b[i], 0)
-const length = (v: Vec3) => Math.hypot(...v)
-const distance = (a: Vec3, b: Vec3) => length(sub(a, b))
-const unit = (v: Vec3): Vec3 => { const d = length(v); return v.map(x => x / (d || 1)) as Vec3 }
-type Path = { points: Vec3[]; lengths: number[]; total: number; marks: number[]; controls?: Vec3[] }
+// 先展开核对过的绳路，再沿预先编排的形变收拢结芯。
+// 所有形变都可倒放，不累积物理模拟状态。
+const RADIUS = 0.06;
+/** 步骤起点，末尾的 1 用于计算最后一步时长。 */
+const TIMES = [0, 0.14, 0.4, 0.66, 0.82, 1] as const;
+/** 限制进度范围，无效值回到起点。 */
+const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 
+/** 用平滑缓动衔接动作。 */
+const ease = (n: number) => {
+  const t = clamp(n);
+
+  return t * t * (3 - 2 * t);
+};
+
+/** 按比例插值。 */
+const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+/** 插值三维位置。 */
+const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i], t)) as Vec3;
+/** 计算向量差。 */
+const sub = (a: Vec3, b: Vec3): Vec3 => a.map((v, i) => v - b[i]) as Vec3;
+/** 计算向量点积。 */
+const dot = (a: Vec3, b: Vec3) => a.reduce((sum, v, i) => sum + v * b[i], 0);
+/** 计算向量长度。 */
+const length = (v: Vec3) => Math.hypot(...v);
+/** 计算两点距离。 */
+const distance = (a: Vec3, b: Vec3) => length(sub(a, b));
+
+/** 归一化方向，零向量保持不变。 */
+const unit = (v: Vec3): Vec3 => {
+  const d = length(v);
+
+  return v.map((x) => x / (d || 1)) as Vec3;
+};
+
+/** 绳路与弧长；marks 保存教学分界。 */
+type Path = {
+  points: Vec3[];
+  lengths: number[];
+  total: number;
+  marks: number[];
+  controls?: Vec3[];
+};
+
+/** 计算路径弧长，保留教学分界。 */
 function makePath(points: Vec3[], marks: number[] = []): Path {
-  const lengths = [0]
-  for (let i = 1; i < points.length; i++) lengths.push(lengths[i - 1] + distance(points[i - 1], points[i]))
-  return { points, lengths, total: lengths[lengths.length - 1], marks }
+  const lengths = [0];
+
+  for (let i = 1; i < points.length; i++) {
+    lengths.push(lengths[i - 1] + distance(points[i - 1], points[i]));
+  }
+
+  return { points, lengths, total: lengths[lengths.length - 1], marks };
 }
 
-/** A convex-hull C2 spline preserves the authored crossing depths. */
+/** 用受凸包约束的 C2 样条平滑绳路，保住预先安排的交叉深度。 */
 function spline(controls: Vec3[]): Path {
-  const first = controls[0], last = controls[controls.length - 1]
-  const padded = [first, first, ...controls, last, last]
-  const points: Vec3[] = [[...first]]
-  const marks: number[] = []
-  let travelled = 0
+  const first = controls[0],
+    last = controls[controls.length - 1];
+
+  const padded = [first, first, ...controls, last, last];
+  const points: Vec3[] = [[...first]];
+  const marks: number[] = [];
+  let travelled = 0;
+
   for (let span = 0; span < padded.length - 3; span++) {
-    const a = padded[span], b = padded[span + 1], c = padded[span + 2], d = padded[span + 3]
-    const divisions = Math.max(20, Math.ceil((distance(a, b) + distance(b, c) + distance(c, d)) / 0.04))
+    const a = padded[span],
+      b = padded[span + 1],
+      c = padded[span + 2],
+      d = padded[span + 3];
+
+    const divisions = Math.max(
+      20,
+      Math.ceil((distance(a, b) + distance(b, c) + distance(c, d)) / 0.04),
+    );
+
     for (let i = 1; i <= divisions; i++) {
-      const t = i / divisions, t2 = t * t, t3 = t2 * t
-      const w = [(1 - 3 * t + 3 * t2 - t3) / 6, (4 - 6 * t2 + 3 * t3) / 6, (1 + 3 * t + 3 * t2 - 3 * t3) / 6, t3 / 6]
-      const point = [0, 1, 2].map(k => a[k] * w[0] + b[k] * w[1] + c[k] * w[2] + d[k] * w[3]) as Vec3
-      const segment = distance(points[points.length - 1], point)
-      if (segment > 1e-9) { points.push(point); travelled += segment }
+      const t = i / divisions,
+        t2 = t * t,
+        t3 = t2 * t;
+
+      const w = [
+        (1 - 3 * t + 3 * t2 - t3) / 6,
+        (4 - 6 * t2 + 3 * t3) / 6,
+        (1 + 3 * t + 3 * t2 - 3 * t3) / 6,
+        t3 / 6,
+      ];
+
+      const point = [0, 1, 2].map(
+        (k) => a[k] * w[0] + b[k] * w[1] + c[k] * w[2] + d[k] * w[3],
+      ) as Vec3;
+
+      const segment = distance(points[points.length - 1], point);
+
+      if (segment > 1e-9) {
+        points.push(point);
+        travelled += segment;
+      }
     }
-    marks.push(travelled)
+
+    marks.push(travelled);
   }
-  return { ...makePath(points, marks), controls }
+
+  return { ...makePath(points, marks), controls };
 }
 
+/** 按弧长二分定位，再插值取点。 */
 function pointAt(path: Path, offset: number): Vec3 {
-  const s = Math.max(0, Math.min(path.total, offset))
-  let low = 1, high = path.points.length - 1
-  while (low < high) { const mid = (low + high) >> 1; if (path.lengths[mid] < s) low = mid + 1; else high = mid }
-  const span = path.lengths[low] - path.lengths[low - 1]
-  return lerp(path.points[low - 1], path.points[low], span > 0 ? (s - path.lengths[low - 1]) / span : 0)
+  const s = Math.max(0, Math.min(path.total, offset));
+  let low = 1,
+    high = path.points.length - 1;
+
+  while (low < high) {
+    const mid = (low + high) >> 1;
+
+    if (path.lengths[mid] < s) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  const span = path.lengths[low] - path.lengths[low - 1];
+
+  return lerp(
+    path.points[low - 1],
+    path.points[low],
+    span > 0 ? (s - path.lengths[low - 1]) / span : 0,
+  );
 }
 
+/** 按弧长截取并均匀采样可见绳段。 */
 function prefix(path: Path, offset: number): Vec3[] {
-  const s = Math.max(0.3, Math.min(path.total, offset))
-  const count = Math.max(16, Math.ceil(s / 0.023))
-  return Array.from({ length: count + 1 }, (_, i) => pointAt(path, s * i / count))
+  const s = Math.max(0.3, Math.min(path.total, offset));
+  const count = Math.max(16, Math.ceil(s / 0.023));
+
+  return Array.from({ length: count + 1 }, (_, i) => pointAt(path, (s * i) / count));
 }
 
+/** 查找当前步骤，分界时刻归入下一步。 */
 function checkpoint(progress: number): number {
-  for (let i = TIMES.length - 2; i >= 0; i--) if (progress >= TIMES[i]) return i
-  return 0
+  for (let i = TIMES.length - 2; i >= 0; i--) {
+    if (progress >= TIMES[i]) {
+      return i;
+    }
+  }
+
+  return 0;
 }
 
+/** 把步骤内进度换成可见绳长。 */
 function amount(progress: number, cuts: readonly number[]): number {
-  const step = checkpoint(progress)
-  return mix(cuts[step], cuts[step + 1], ease((progress - TIMES[step]) / (TIMES[step + 1] - TIMES[step])))
+  const step = checkpoint(progress);
+
+  return mix(
+    cuts[step],
+    cuts[step + 1],
+    ease((progress - TIMES[step]) / (TIMES[step + 1] - TIMES[step])),
+  );
 }
 
+/** 配好每一步的时间和说明。 */
 function steps(titles: string[], instructions: string[]): LessonStep[] {
-  return titles.map((title, i) => ({ time: TIMES[i], title, instruction: instructions[i] }))
+  return titles.map((title, i) => ({ time: TIMES[i], title, instruction: instructions[i] }));
 }
 
-function trace(path: Path, cuts: number[], color: string, tightControls?: Vec3[]): (progress: number) => LessonState {
-  return progress => {
-    const p = clamp(progress)
-    const tension = ease((p - 0.82) / 0.18)
-    const active = tension > 0 && tightControls && path.controls
-      ? spline(path.controls.map((point, i) => lerp(point, tightControls[i], tension))) : path
-    const points = prefix(active, tension > 0 ? active.total : amount(p, cuts))
-    return { points, tip: [...points[points.length - 1]], checkpoint: checkpoint(p), color, radius: RADIUS }
-  }
+/** 生成单股路线的逐帧取样入口。 */
+function trace(
+  path: Path,
+  cuts: number[],
+  color: string,
+  tightControls?: Vec3[],
+): (progress: number) => LessonState {
+  return (progress) => {
+    const p = clamp(progress);
+    const tension = ease((p - 0.82) / 0.18);
+    const active =
+      tension > 0 && tightControls && path.controls
+        ? spline(path.controls.map((point, i) => lerp(point, tightControls[i], tension)))
+        : path;
+
+    const points = prefix(active, tension > 0 ? active.total : amount(p, cuts));
+
+    return {
+      points,
+      tip: [...points[points.length - 1]],
+      checkpoint: checkpoint(p),
+      color,
+      radius: RADIUS,
+    };
+  };
 }
 
+/** 生成前后错开的起始绳圈。 */
 function circleGuides(): Vec3[] {
-  const guides: Vec3[] = [[-2.65, -1.45, 0.30], [-1.65, -1.38, 0.30]]
+  const guides: Vec3[] = [
+    [-2.65, -1.45, 0.3],
+    [-1.65, -1.38, 0.3],
+  ];
+
   for (let i = 0; i <= 12; i++) {
-    const u = i / 12, angle = mix(-1.3, 4.45, u)
-    guides.push([1.2 * Math.cos(angle), 0.35 + 1.2 * Math.sin(angle), 0.30 * Math.exp(-u / 0.065) - 0.30 * Math.exp(-(1 - u) / 0.065)])
+    const u = i / 12,
+      angle = mix(-1.3, 4.45, u);
+
+    guides.push([
+      1.2 * Math.cos(angle),
+      0.35 + 1.2 * Math.sin(angle),
+      0.3 * Math.exp(-u / 0.065) - 0.3 * Math.exp(-(1 - u) / 0.065),
+    ]);
   }
-  return guides
+
+  return guides;
 }
 
-// Each passage crosses the initial loop from front to back. The second
-// return travels outside its right rim before re-entering, adding two
-// crossings: the closed diagram is T(2,5), not a relabelled single overhand.
-// Topology reference: https://www.katlas.org/wiki/T%285%2C2%29
+// 两次穿环都从初始绳圈的前面穿到后面。第二次先绕过右侧圈沿再返回，
+// 因而多出两处交叉；闭合后的结图是 T(2,5)，不是给单结换个名字。
+// 拓扑参考：https://www.katlas.org/wiki/T%285%2C2%29
 const doublePath = spline([
   ...circleGuides(),
-  [0.1, -1.55, -0.30], [1.45, -1.55, -0.10], [1.85, -0.65, 0.60],
-  [-0.35, -0.10, 0.60], [-0.35, -0.10, -0.60],
-  [1.85, 0.30, -0.60], [2.3, 1.0, -0.10], [1.5, 1.85, 0.60],
-  [0.20, 0.55, 0.60], [0.20, 0.55, -0.60], [-0.70, 0.99, -0.60], [-2.45, 1.85, -0.60],
-])
-// Offline dressed centerline: each bend seats against neighboring strands.
+  [0.1, -1.55, -0.3],
+  [1.45, -1.55, -0.1],
+  [1.85, -0.65, 0.6],
+  [-0.35, -0.1, 0.6],
+  [-0.35, -0.1, -0.6],
+  [1.85, 0.3, -0.6],
+  [2.3, 1.0, -0.1],
+  [1.5, 1.85, 0.6],
+  [0.2, 0.55, 0.6],
+  [0.2, 0.55, -0.6],
+  [-0.7, 0.99, -0.6],
+  [-2.45, 1.85, -0.6],
+]);
+
+// 预先整理好的收紧中心线，让每处回弯贴住相邻绳段。
 const doubleTight: Vec3[] = [
   [-2.65, -0.75, 0.15],
   [-1.1, -0.75, 0.15],
@@ -131,19 +262,33 @@ const doubleTight: Vec3[] = [
   [-0.04001, 0.132231, -0.028597],
   [-0.187339, 0.255175, -0.089566],
   [-2.65, 1.3, -0.21],
-]
+];
 
-// Form the right-hand loop over the standing strand, travel behind and
-// around the standing strand on the left, then pass down through the loop.
+// 先从固定段上方绕出右侧绳圈，再从左侧绕过固定段后方，
+// 最后向下穿回圈口，八字的四处交叉就在这条路上。
 const figurePath = spline([
-  [-2.65, 0, 0], [-1.65, 0, 0], [-0.45, 0, 0],
-  [0.25, -0.70, 0], [1.40, -1.05, 0], [2.0, -0.30, 0],
-  [1.90, 0.70, 0], [0.80, 1.0, 0], [-0.65, 0, 0.60],
-  [-1.0, -0.85, 0.60], [-2.0, -0.70, -0.60], [-2.05, 0.75, -0.60],
-  [-1.20, 1.30, 0.60], [0.45, 0.60, 0.60], [0.90, 0.40, 0.60], [0.90, 0.40, -0.60], [0.90, -0.25, -0.60],
-  [1.0, -1.65, -0.60], [1.0, -2.35, -0.60],
-])
-// Offline dressed centerline: each bend seats against neighboring strands.
+  [-2.65, 0, 0],
+  [-1.65, 0, 0],
+  [-0.45, 0, 0],
+  [0.25, -0.7, 0],
+  [1.4, -1.05, 0],
+  [2.0, -0.3, 0],
+  [1.9, 0.7, 0],
+  [0.8, 1.0, 0],
+  [-0.65, 0, 0.6],
+  [-1.0, -0.85, 0.6],
+  [-2.0, -0.7, -0.6],
+  [-2.05, 0.75, -0.6],
+  [-1.2, 1.3, 0.6],
+  [0.45, 0.6, 0.6],
+  [0.9, 0.4, 0.6],
+  [0.9, 0.4, -0.6],
+  [0.9, -0.25, -0.6],
+  [1.0, -1.65, -0.6],
+  [1.0, -2.35, -0.6],
+]);
+
+// 预先整理好的收紧中心线，让每处回弯贴住相邻绳段。
 const figureTight: Vec3[] = [
   [-2.65, 0, 0],
   [-1.1, 0, 0],
@@ -164,8 +309,9 @@ const figureTight: Vec3[] = [
   [0.09054, -0.285536, -0.036561],
   [0.509433, -1.524517, -0.149855],
   [0.8, -2.65, -0.23],
-]
-// Dress the paired figure-eight while keeping its external fixed eye.
+];
+
+// 双股八字结收紧时，结外的固定绳圈仍要留着开口。
 const figureLoopTight: Vec3[] = [
   [-2.65, 0, 0],
   [-1.65, 0, 0],
@@ -186,17 +332,27 @@ const figureLoopTight: Vec3[] = [
   [-0.042557, -0.765391, -0.073698],
   [1, -1.65, -0.432],
   [1, -2.15, -0.432],
-]
+];
 
+/** 活结路线，穿入的是短端绳弯。 */
 const slipPath = spline([
   ...circleGuides(),
-  [0.1, -1.55, -0.30], [1.45, -1.55, -0.10], [1.85, -0.65, 0.60],
-  [-0.25, 0.25, 0.60], [-0.25, 0.25, -0.60],
-  [-1.70, 1.0, -0.60], [-2.0, 2.0, -0.60], [-1.0, 2.4, -0.60],
-  [-0.10, 1.50, -0.60], [0.35, 0.65, -0.60], [0.35, 0.65, 0.60],
-  [1.05, 0.93, 0.60], [2.45, 1.5, 0.60],
-])
-// Offline dressed centerline: each bend seats against neighboring strands.
+  [0.1, -1.55, -0.3],
+  [1.45, -1.55, -0.1],
+  [1.85, -0.65, 0.6],
+  [-0.25, 0.25, 0.6],
+  [-0.25, 0.25, -0.6],
+  [-1.7, 1.0, -0.6],
+  [-2.0, 2.0, -0.6],
+  [-1.0, 2.4, -0.6],
+  [-0.1, 1.5, -0.6],
+  [0.35, 0.65, -0.6],
+  [0.35, 0.65, 0.6],
+  [1.05, 0.93, 0.6],
+  [2.45, 1.5, 0.6],
+]);
+
+// 预先整理好的收紧中心线，让每处回弯贴住相邻绳段。
 const slipTight: Vec3[] = [
   [-2.65, -0.55, 0.16],
   [-1.1, -0.55, 0.16],
@@ -226,10 +382,10 @@ const slipTight: Vec3[] = [
   [0.148913, 0.23979, 0.062298],
   [0.32715, 0.231249, 0.046051],
   [2.65, 0.6, 0.24],
-]
+];
 
-// The doubled overhand keeps its own stable controls, so dressing the
-// single-strand lesson cannot change this paired route.
+// 双股单结独立保存控制点；调整单股课程的收紧形状时，
+// 不会连带改变这条双股路线。
 const overhandPath = spline([
   [-2.565, -1.3775, 0.255],
   [-1.5675, -1.311, 0.255],
@@ -252,7 +408,9 @@ const overhandPath = spline([
   [0.114, 0.456, 0.578],
   [0.114, 0.456, -0.578],
   [-2.0425, 1.615, -0.578],
-])
+]);
+
+/** 双股单结独立使用的收紧控制点。 */
 const overhandTight: Vec3[] = [
   [-2.565, -1.3775, 0.255],
   [-1.5675, -1.311, 0.255],
@@ -275,122 +433,252 @@ const overhandTight: Vec3[] = [
   [-0.360632, 0.186141, -0.014659],
   [0.114, 0.456, -0.41616],
   [-2.0425, 1.615, -0.578],
-]
+];
 
-/** Double the route side by side in the teaching projection, closing its bight. */
+/** 沿教学投影把路线并排展开成两股，再用圆弯接起来，仍然是一根绳。 */
 function doubled(points: Vec3[], opening: number): { points: Vec3[]; tip: Vec3 } {
-  const forward: Vec3[] = [], backward: Vec3[] = []
-  const arc = [0]
-  for (let i = 1; i < points.length; i++) arc.push(arc[i - 1] + distance(points[i - 1], points[i]))
-  const total = arc[arc.length - 1]
-  let normal: Vec3 = [0, 1, 0]
-  let tangent: Vec3 = [1, 0, 0]
-  let halfWidth = 0.10
+  const forward: Vec3[] = [],
+    backward: Vec3[] = [];
+
+  const arc = [0];
+
+  for (let i = 1; i < points.length; i++) {
+    arc.push(arc[i - 1] + distance(points[i - 1], points[i]));
+  }
+
+  const total = arc[arc.length - 1];
+  let normal: Vec3 = [0, 1, 0];
+  let tangent: Vec3 = [1, 0, 0];
+  let halfWidth = 0.1;
+
   for (let i = 0; i < points.length; i++) {
-    tangent = unit(sub(points[Math.min(i + 1, points.length - 1)], points[Math.max(0, i - 1)]))
-    const planar: Vec3 = [-tangent[1], tangent[0], 0]
-    normal = length(planar) > 1e-6 ? unit(planar)
-      : unit(sub(normal, tangent.map(v => v * dot(normal, tangent)) as Vec3))
-    const spread = opening * ease((arc[i] - total + 1.25) / 1.25)
-    // Outside the knot, spread the two legs into a visible fixed eye. Keep
-    // the eye in the teaching plane and its tangent continuous at the bend.
-    // Seat the paired strands almost tangent while the functional eye stays open.
-    halfWidth = mix(0.10, 0.062, opening) + (0.46 - mix(0.10, 0.062, opening)) * spread
-    forward.push(points[i].map((v, a) => v + halfWidth * normal[a]) as Vec3)
-    backward.push(points[i].map((v, a) => v - halfWidth * normal[a]) as Vec3)
+    tangent = unit(sub(points[Math.min(i + 1, points.length - 1)], points[Math.max(0, i - 1)]));
+    const planar: Vec3 = [-tangent[1], tangent[0], 0];
+    normal =
+      length(planar) > 1e-6
+        ? unit(planar)
+        : unit(sub(normal, tangent.map((v) => v * dot(normal, tangent)) as Vec3));
+    const spread = opening * ease((arc[i] - total + 1.25) / 1.25);
+    // 到结外再把两股分开，留下看得清的固定绳圈。
+    // 圈口留在教学平面里，转弯处保持切线连续；
+    // 结内两股接近相切，但结外真正用来套挂的开口不能消失。
+    halfWidth = mix(0.1, 0.062, opening) + (0.46 - mix(0.1, 0.062, opening)) * spread;
+    forward.push(points[i].map((v, a) => v + halfWidth * normal[a]) as Vec3);
+    backward.push(points[i].map((v, a) => v - halfWidth * normal[a]) as Vec3);
   }
-  const end = points[points.length - 1]
-  const bight: Vec3[] = []
+
+  const end = points[points.length - 1];
+  const bight: Vec3[] = [];
+
   for (let i = 1; i < 24; i++) {
-    const angle = Math.PI * i / 24
-    bight.push(end.map((v, a) => v + halfWidth * (normal[a] * Math.cos(angle) + tangent[a] * Math.sin(angle))) as Vec3)
+    const angle = (Math.PI * i) / 24;
+    bight.push(
+      end.map(
+        (v, a) => v + halfWidth * (normal[a] * Math.cos(angle) + tangent[a] * Math.sin(angle)),
+      ) as Vec3,
+    );
   }
-  const rope = [...forward, ...bight, ...backward.reverse()]
-  return { points: rope, tip: [...rope[rope.length - 1]] }
+
+  const rope = [...forward, ...bight, ...backward.reverse()];
+
+  return { points: rope, tip: [...rope[rope.length - 1]] };
 }
 
-function onBight(path: Path, cuts: number[], color: string, tightControls: Vec3[]): (progress: number) => LessonState {
-  return progress => {
-    const p = clamp(progress), tension = ease((p - 0.82) / 0.18)
-    const active = tension > 0 && path.controls
-      ? spline(path.controls.map((point, i) => lerp(point, tightControls[i], tension))) : path
-    const result = doubled(prefix(active, tension > 0 ? active.total : amount(p, cuts)), tension)
-    return { ...result, checkpoint: checkpoint(p), color, radius: RADIUS, showEndLabels: false, hideMainTip: true }
-  }
+/** 生成双股绳圈课程的取帧入口。 */
+function onBight(
+  path: Path,
+  cuts: number[],
+  color: string,
+  tightControls: Vec3[],
+): (progress: number) => LessonState {
+  return (progress) => {
+    const p = clamp(progress),
+      tension = ease((p - 0.82) / 0.18);
+
+    const active =
+      tension > 0 && path.controls
+        ? spline(path.controls.map((point, i) => lerp(point, tightControls[i], tension)))
+        : path;
+
+    const result = doubled(prefix(active, tension > 0 ? active.total : amount(p, cuts)), tension);
+
+    return {
+      ...result,
+      checkpoint: checkpoint(p),
+      color,
+      radius: RADIUS,
+      showEndLabels: false,
+      hideMainTip: true,
+    };
+  };
 }
 
-const figureCuts = [0.7, figurePath.marks[2], figurePath.marks[9], figurePath.marks[12], figurePath.total, figurePath.total]
-const overhandCuts = [0.7, overhandPath.total * 0.15, overhandPath.total * 0.56, overhandPath.total * 0.82, overhandPath.total, overhandPath.total]
+const figureCuts = [
+  0.7,
+  figurePath.marks[2],
+  figurePath.marks[9],
+  figurePath.marks[12],
+  figurePath.total,
+  figurePath.total,
+];
+
+const overhandCuts = [
+  0.7,
+  overhandPath.total * 0.15,
+  overhandPath.total * 0.56,
+  overhandPath.total * 0.82,
+  overhandPath.total,
+  overhandPath.total,
+];
 
 export const KNOT_EXTRA_COURSES: Course[] = [
+  /** 双重单结在同一绳圈里完成两次穿入，收紧时保住两次绕行。 */
   {
-    id: 'double-overhand', category: 'knots', name: '双重单结', title: '同一绳圈，连续穿过两次',
+    id: 'double-overhand',
+    category: 'knots',
+    name: '双重单结',
+    title: '同一绳圈，连续穿过两次',
     description: '在单结的基础上增加一次穿环，认识双重单结的两次缠绕。',
-    material: '一根柔软圆绳', materialNote: '先展开两次穿环的路径，最后牵引绳端，使结芯收拢；绳径保持不变。', duration: 22, initialProgress: 0.72,
-    steps: steps(['准备绳线', '形成绳圈', '第一次穿环', '第二次穿环', '拉紧双重单结'], [
-      '辨认标为 1B 的固定端和 1A 的工作端。演示沿绳子的真实连续路径逐段展开。',
-      '绕出一个绳圈，让后续工作端能穿过圈内。',
-      '工作端由圈前穿到圈后，完成第一次穿环。',
-      '沿圈外绕回前方，再穿过同一个绳圈一次。',
-      '向外牵引绳端，让两个绕圈靠拢。结芯收小，尾段拉直，两次穿环的上下关系保持不变。',
-    ]),
-    source: 'https://www.animatedknots.com/double-overhand-stopper-knot', sourceName: 'Animated Knots · Double Overhand Stopper',
-    getState: trace(doublePath, [0.7, doublePath.marks[2], doublePath.marks[15], doublePath.marks[20], doublePath.total, doublePath.total], '#c98b51', doubleTight),
+    material: '一根柔软圆绳',
+    materialNote: '先展开两次穿环的路径，最后牵引绳端，使结芯收拢；绳径保持不变。',
+    duration: 22,
+    initialProgress: 0.72,
+    steps: steps(
+      ['准备绳线', '形成绳圈', '第一次穿环', '第二次穿环', '拉紧双重单结'],
+      [
+        '辨认标为 1B 的固定端和 1A 的工作端。演示沿绳子的真实连续路径逐段展开。',
+        '绕出一个绳圈，让后续工作端能穿过圈内。',
+        '工作端由圈前穿到圈后，完成第一次穿环。',
+        '沿圈外绕回前方，再穿过同一个绳圈一次。',
+        '向外牵引绳端，让两个绕圈靠拢。结芯收小，尾段拉直，两次穿环的上下关系保持不变。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/double-overhand-stopper-knot',
+    sourceName: 'Animated Knots · Double Overhand Stopper',
+    getState: trace(
+      doublePath,
+      [
+        0.7,
+        doublePath.marks[2],
+        doublePath.marks[15],
+        doublePath.marks[20],
+        doublePath.total,
+        doublePath.total,
+      ],
+      '#c98b51',
+      doubleTight,
+    ),
   },
+  /** 八字结沿四处交叉辨认绕主绳和回穿圈口的顺序。 */
   {
-    id: 'figure-eight', category: 'knots', name: '八字结', title: '绕过固定段，再穿回绳圈',
+    id: 'figure-eight',
+    category: 'knots',
+    name: '八字结',
+    title: '绕过固定段，再穿回绳圈',
     description: '通过成圈、绕固定段和穿环，认识八字止索结的四处交叉。',
-    material: '一根柔软圆绳', materialNote: '先看清四处交叉，再牵引绳端，让两个弯圈逐渐收拢。', duration: 23, initialProgress: 0.73,
-    steps: steps(['准备绳线', '上跨成圈', '绕过固定段', '向下穿环', '拉紧八字结'], [
-      '固定段放在左侧，沿标为 1A 的工作端观察绳线的行进方向。',
-      '工作端从自身上方跨过，形成右侧的第一个绳圈。',
-      '继续从固定段下方经过，再绕到它的另一侧。',
-      '回到原绳圈前方，把工作端向下穿入圈中并引出。',
-      '牵引固定段和工作端，使两个弯圈收拢、尾段拉直；四处交叉继续保持原来的上下关系。',
-    ]),
-    source: 'https://www.animatedknots.com/figure-8-knot', sourceName: 'Animated Knots · Figure 8 Knot',
+    material: '一根柔软圆绳',
+    materialNote: '先看清四处交叉，再牵引绳端，让两个弯圈逐渐收拢。',
+    duration: 23,
+    initialProgress: 0.73,
+    steps: steps(
+      ['准备绳线', '上跨成圈', '绕过固定段', '向下穿环', '拉紧八字结'],
+      [
+        '固定段放在左侧，沿标为 1A 的工作端观察绳线的行进方向。',
+        '工作端从自身上方跨过，形成右侧的第一个绳圈。',
+        '继续从固定段下方经过，再绕到它的另一侧。',
+        '回到原绳圈前方，把工作端向下穿入圈中并引出。',
+        '牵引固定段和工作端，使两个弯圈收拢、尾段拉直；四处交叉继续保持原来的上下关系。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/figure-8-knot',
+    sourceName: 'Animated Knots · Figure 8 Knot',
     getState: trace(figurePath, figureCuts, '#a86a46', figureTight),
   },
+  /** 活结用短端绳弯代替整根工作端穿环，留下可抽出的活套。 */
   {
-    id: 'slip-knot', category: 'knots', name: '活结', title: '把绳弯穿进去，留下可抽出的活套',
+    id: 'slip-knot',
+    category: 'knots',
+    name: '活结',
+    title: '把绳弯穿进去，留下可抽出的活套',
     description: '用短端形成绳弯代替整根绳头穿环，认识单结活套的结构。',
-    material: '一根柔软圆绳', materialNote: '先看清活套的两条腿，最后收紧结芯，保留可以抽出的活套。', duration: 22, initialProgress: 0.78,
-    steps: steps(['准备短端', '形成绳圈', '辨认绳弯', '绳弯穿环', '拉紧活结'], [
-      '辨认短的工作端，活结的绳弯由短端形成。',
-      '先绕出一个绳圈，为短端绳弯留下入口。',
-      '沿短端的走线看它如何折返；要穿入的是折弯部分。',
-      '展示绳弯的两条腿从圈内经过，短端仍留在圈外。',
-      '收小结芯并整理绳尾，保留活套。注意活套由短端的绳弯构成，拉短端可以把它抽出。',
-    ]),
-    source: 'https://www.animatedknots.com/slip-knot', sourceName: 'Animated Knots · Slip Knot',
-    getState: trace(slipPath, [0.7, slipPath.marks[2], slipPath.marks[15], slipPath.marks[22], slipPath.total, slipPath.total], '#be7857', slipTight),
+    material: '一根柔软圆绳',
+    materialNote: '先看清活套的两条腿，最后收紧结芯，保留可以抽出的活套。',
+    duration: 22,
+    initialProgress: 0.78,
+    steps: steps(
+      ['准备短端', '形成绳圈', '辨认绳弯', '绳弯穿环', '拉紧活结'],
+      [
+        '辨认短的工作端，活结的绳弯由短端形成。',
+        '先绕出一个绳圈，为短端绳弯留下入口。',
+        '沿短端的走线看它如何折返；要穿入的是折弯部分。',
+        '展示绳弯的两条腿从圈内经过，短端仍留在圈外。',
+        '收小结芯并整理绳尾，保留活套。注意活套由短端的绳弯构成，拉短端可以把它抽出。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/slip-knot',
+    sourceName: 'Animated Knots · Slip Knot',
+    getState: trace(
+      slipPath,
+      [
+        0.7,
+        slipPath.marks[2],
+        slipPath.marks[15],
+        slipPath.marks[22],
+        slipPath.total,
+        slipPath.total,
+      ],
+      '#be7857',
+      slipTight,
+    ),
   },
+  /** 双股一起打单结，结外的折弯部分保留为固定绳圈。 */
   {
-    id: 'overhand-loop', category: 'knots', name: '单结绳圈', title: '把双股当一根绳，打出固定绳圈',
+    id: 'overhand-loop',
+    category: 'knots',
+    name: '单结绳圈',
+    title: '把双股当一根绳，打出固定绳圈',
     description: '折绳后以绳弯作为工作端，双股一起形成单结。',
-    material: '一根对折的圆绳', materialNote: '两股属于同一根绳；最后集中结芯，把结外绳弯整理成明显的固定绳圈。', duration: 23, initialProgress: 0.76,
-    steps: steps(['对折成绳弯', '双股绕圈', '绳弯靠近入口', '双股一起穿环', '拉紧单结绳圈'], [
-      '先对折绳子，前端圆弯连接着两条并排绳段。',
-      '把两股看成一根粗绳，一起绕出单结的绳圈。',
-      '保持两股并排，把折弯端带到圈前。',
-      '折弯端完整穿过绳圈，两股沿相同路径前进。',
-      '牵引双股固定段，使结芯集中；把结外双股分开整理成绳圈，保留清楚的套环。',
-    ]),
-    source: 'https://www.netknots.com/rope_knots/overhand-loop-knot', sourceName: 'NetKnots · Overhand Loop Knot',
+    material: '一根对折的圆绳',
+    materialNote: '两股属于同一根绳；最后集中结芯，把结外绳弯整理成明显的固定绳圈。',
+    duration: 23,
+    initialProgress: 0.76,
+    steps: steps(
+      ['对折成绳弯', '双股绕圈', '绳弯靠近入口', '双股一起穿环', '拉紧单结绳圈'],
+      [
+        '先对折绳子，前端圆弯连接着两条并排绳段。',
+        '把两股看成一根粗绳，一起绕出单结的绳圈。',
+        '保持两股并排，把折弯端带到圈前。',
+        '折弯端完整穿过绳圈，两股沿相同路径前进。',
+        '牵引双股固定段，使结芯集中；把结外双股分开整理成绳圈，保留清楚的套环。',
+      ],
+    ),
+    source: 'https://www.netknots.com/rope_knots/overhand-loop-knot',
+    sourceName: 'NetKnots · Overhand Loop Knot',
     getState: onBight(overhandPath, overhandCuts, '#b87e48', overhandTight),
   },
+  /** 双股沿八字路线穿绕，结外只保留一个固定绳圈。 */
   {
-    id: 'figure-eight-loop', category: 'knots', name: '八字绳圈', title: '用折弯端，完成双股八字路径',
+    id: 'figure-eight-loop',
+    category: 'knots',
+    name: '八字绳圈',
+    title: '用折弯端，完成双股八字路径',
     description: '将对折绳子的双股作为一个工作单元，形成八字固定绳圈。',
-    material: '一根对折的圆绳', materialNote: '采用绳弯打法，只有一个固定绳圈；不是双耳八字结，也不是回穿系挂演示。', duration: 25, initialProgress: 0.77,
-    steps: steps(['对折绳子', '双股上跨成圈', '绕过双股固定段', '折弯端穿环', '拉紧八字绳圈'], [
-      '前端圆弯是工作端，两条并排的线始终属于同一根绳。',
-      '双股一起上跨，形成八字结的第一个圈。',
-      '把折弯端从双股固定段下方绕过去。',
-      '折弯端向下穿回最初的绳圈，带着两股一起通过。',
-      '把双股八字结的结芯收拢、绳尾拉顺，结外绳弯展开成一个固定绳圈。',
-    ]),
-    source: 'https://gravitec.com/resources/how-to-tie-knots/figure-eight-on-a-bight-knot/', sourceName: 'Gravitec · Figure-Eight on a Bight',
+    material: '一根对折的圆绳',
+    materialNote: '采用绳弯打法，只有一个固定绳圈；不是双耳八字结，也不是回穿系挂演示。',
+    duration: 25,
+    initialProgress: 0.77,
+    steps: steps(
+      ['对折绳子', '双股上跨成圈', '绕过双股固定段', '折弯端穿环', '拉紧八字绳圈'],
+      [
+        '前端圆弯是工作端，两条并排的线始终属于同一根绳。',
+        '双股一起上跨，形成八字结的第一个圈。',
+        '把折弯端从双股固定段下方绕过去。',
+        '折弯端向下穿回最初的绳圈，带着两股一起通过。',
+        '把双股八字结的结芯收拢、绳尾拉顺，结外绳弯展开成一个固定绳圈。',
+      ],
+    ),
+    source: 'https://gravitec.com/resources/how-to-tie-knots/figure-eight-on-a-bight-knot/',
+    sourceName: 'Gravitec · Figure-Eight on a Bight',
     getState: onBight(figurePath, figureCuts, '#ad7354', figureLoopTight),
   },
-]
+];

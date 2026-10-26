@@ -1,0 +1,27 @@
+{
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "singleAttributePerLine": true,
+  "bracketSameLine": false,
+  "vueIndentScriptAndStyle": true,
+  "htmlWhitespaceSensitivity": "ignore",
+  "endOfLine": "lf",
+  "overrides": [
+    {
+      "files": "*.vue",
+      "options": {
+        "htmlWhitespaceSensitivity": "strict"
+      }
+    },
+    {
+      "files": "*.svg",
+      "options": {
+        "parser": "html"
+      }
+    }
+  ]
+}

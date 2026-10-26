@@ -1,55 +1,140 @@
-import type { Course, LessonState, LessonStep, Vec3 } from './types'
+import type { Course, LessonState, LessonStep, Vec3 } from './types';
+import { SINGLE_FISHERMAN_COURSE } from './knots-reference-single-fisherman';
 
-// Independent two-rope joins, with pre-authored route construction and
-// continuous dressing. Progress is pure input; no accumulated simulation.
-const RADIUS = 0.06
-const TIMES = [0, 0.14, 0.38, 0.62, 0.82, 1] as const
-const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0))
-const ease = (v: number) => { const t = clamp(v); return t * t * (3 - 2 * t) }
-const mix = (a: number, b: number, t: number) => a + (b - a) * t
-const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i]!, t)) as Vec3
-const distance = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
-type Path = { points: Vec3[]; lengths: number[]; total: number; marks: number[] }
+// 两根绳分别沿预先编排的路线穿绕，再连续收紧。
+// 每一帧只取决于当前进度，不带上一次模拟留下的状态。
+const RADIUS = 0.06;
+/** 步骤起点，末尾的 1 用于计算最后一步时长。 */
+const TIMES = [0, 0.14, 0.38, 0.62, 0.82, 1] as const;
+/** 限制进度范围，无效值回到起点。 */
+const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
+/** 用平滑缓动衔接动作。 */
+const ease = (v: number) => {
+  const t = clamp(v);
+
+  return t * t * (3 - 2 * t);
+};
+
+/** 按比例插值。 */
+const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+/** 插值三维位置。 */
+const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => a.map((v, i) => mix(v, b[i]!, t)) as Vec3;
+/** 计算两点距离。 */
+const distance = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+/** 绳路与弧长；marks 保存教学分界。 */
+type Path = { points: Vec3[]; lengths: number[]; total: number; marks: number[] };
+
+/** 计算路径弧长，保留教学分界。 */
 function pathOf(points: Vec3[], marks: number[] = []): Path {
-  const lengths = [0]
-  for (let i = 1; i < points.length; i++) lengths.push(lengths[i - 1]! + distance(points[i - 1]!, points[i]!))
-  return { points, lengths, total: lengths.at(-1)!, marks }
+  const lengths = [0];
+
+  for (let i = 1; i < points.length; i++) {
+    lengths.push(lengths[i - 1]! + distance(points[i - 1]!, points[i]!));
+  }
+
+  return { points, lengths, total: lengths.at(-1)!, marks };
 }
 
-function spline(controls: Vec3[], transform: (p: Vec3) => Vec3 = p => p): Path {
-  const first = controls[0]!, last = controls.at(-1)!
-  const padded = [first, first, ...controls, last, last]
-  const points: Vec3[] = [transform([...first])], marks: number[] = []
-  let arc = 0
+/** 平滑控制点，并记录各段弧长。 */
+function spline(controls: Vec3[], transform: (p: Vec3) => Vec3 = (p) => p): Path {
+  const first = controls[0]!,
+    last = controls.at(-1)!;
+
+  const padded = [first, first, ...controls, last, last];
+  const points: Vec3[] = [transform([...first])],
+    marks: number[] = [];
+
+  let arc = 0;
+
   for (let span = 0; span < padded.length - 3; span++) {
     for (let i = 1; i <= 36; i++) {
-      const t = i / 36, t2 = t * t, t3 = t2 * t
-      const w = [(1 - t) ** 3 / 6, (4 - 6 * t2 + 3 * t3) / 6, (1 + 3 * t + 3 * t2 - 3 * t3) / 6, t3 / 6]
-      const point = transform([0, 1, 2].map(a => w.reduce((sum, weight, k) => sum + padded[span + k]![a]! * weight, 0)) as Vec3)
-      const step = distance(points.at(-1)!, point)
-      if (step > 1e-10) { points.push(point); arc += step }
+      const t = i / 36,
+        t2 = t * t,
+        t3 = t2 * t;
+
+      const w = [
+        (1 - t) ** 3 / 6,
+        (4 - 6 * t2 + 3 * t3) / 6,
+        (1 + 3 * t + 3 * t2 - 3 * t3) / 6,
+        t3 / 6,
+      ];
+
+      const point = transform(
+        [0, 1, 2].map((a) =>
+          w.reduce((sum, weight, k) => sum + padded[span + k]![a]! * weight, 0),
+        ) as Vec3,
+      );
+
+      const step = distance(points.at(-1)!, point);
+
+      if (step > 1e-10) {
+        points.push(point);
+        arc += step;
+      }
     }
-    marks.push(arc)
+
+    marks.push(arc);
   }
-  return pathOf(points, marks)
+
+  return pathOf(points, marks);
 }
 
+/** 按弧长二分定位，再插值取点。 */
 function at(path: Path, offset: number): Vec3 {
-  const s = Math.max(0, Math.min(path.total, offset))
-  let left = 1, right = path.points.length - 1
-  while (left < right) { const middle = (left + right) >> 1; if (path.lengths[middle]! < s) left = middle + 1; else right = middle }
-  return lerp(path.points[left - 1]!, path.points[left]!, (s - path.lengths[left - 1]!) / (path.lengths[left]! - path.lengths[left - 1]! || 1))
+  const s = Math.max(0, Math.min(path.total, offset));
+  let left = 1,
+    right = path.points.length - 1;
+
+  while (left < right) {
+    const middle = (left + right) >> 1;
+
+    if (path.lengths[middle]! < s) {
+      left = middle + 1;
+    } else {
+      right = middle;
+    }
+  }
+
+  return lerp(
+    path.points[left - 1]!,
+    path.points[left]!,
+    (s - path.lengths[left - 1]!) / (path.lengths[left]! - path.lengths[left - 1]! || 1),
+  );
 }
+
+/** 按弧长截取并均匀采样可见绳段。 */
 function prefix(path: Path, amount: number): Vec3[] {
-  const length = Math.max(0.25, Math.min(path.total, amount)), divisions = Math.max(16, Math.ceil(length / 0.018))
-  return Array.from({ length: divisions + 1 }, (_, i) => at(path, length * i / divisions))
+  const length = Math.max(0.25, Math.min(path.total, amount)),
+    divisions = Math.max(16, Math.ceil(length / 0.018));
+
+  return Array.from({ length: divisions + 1 }, (_, i) => at(path, (length * i) / divisions));
 }
-function stepAt(p: number) { for (let i = 4; i >= 0; i--) if (p >= TIMES[i]!) return i; return 0 }
-function makeSteps(titles: string[], text: string[]): LessonStep[] { return titles.map((title, i) => ({ time: TIMES[i]!, title, instruction: text[i]! })) }
-function revealed(p: number, cuts: number[]) { const i = stepAt(p); return mix(cuts[i]!, cuts[i + 1]!, ease((p - TIMES[i]!) / (TIMES[i + 1]! - TIMES[i]!))) }
 
+/** 查找当前步骤。 */
+function stepAt(p: number) {
+  for (let i = 4; i >= 0; i--) {
+    if (p >= TIMES[i]!) {
+      return i;
+    }
+  }
 
+  return 0;
+}
+
+/** 配好每一步的时间和说明。 */
+function makeSteps(titles: string[], text: string[]): LessonStep[] {
+  return titles.map((title, i) => ({ time: TIMES[i]!, title, instruction: text[i]! }));
+}
+
+/** 按步骤分界推进可见绳长。 */
+function revealed(p: number, cuts: number[]) {
+  const i = stepAt(p);
+
+  return mix(cuts[i]!, cuts[i + 1]!, ease((p - TIMES[i]!) / (TIMES[i + 1]! - TIMES[i]!)));
+}
+
+/** 单编结松开坐标：蓝色绳弯在前，红色工作绳在后。 */
 const SHEET_LOOSE: Vec3[][] = [
   [
     [-2.7, 0.0, 0.0],
@@ -92,15 +177,16 @@ const SHEET_LOOSE: Vec3[][] = [
     [1.25, 2.2, -0.032],
     [1.5, 2.5, 0.0],
   ],
-]
+];
 
+/** 单编结收紧坐标，与松开状态逐点对应。 */
 const SHEET_TIGHT: Vec3[][] = [
   [
     [-2.7, 0.0, 0.0],
     [-1.2, 0.0, 0.0],
     [-0.8558823, 0.0357524, 0.045698],
     [-0.2434948, 0.125959, 0.10601],
-    [8.98e-05, 0.0812835, -0.06463],
+    [8.98e-5, 0.0812835, -0.06463],
     [0.212312, -0.0254417, 0.0910957],
     [0.3130551, 0.0510957, 0.1111176],
     [0.3354871, 0.0986918, 0.0975591],
@@ -136,185 +222,84 @@ const SHEET_TIGHT: Vec3[][] = [
     [0.736516, 0.5015113, 0.0142275],
     [2.7, 0.45, 0.0],
   ],
-]
+];
 
-const sheetLoose = SHEET_LOOSE.map(controls => spline(controls))
+const sheetLoose = SHEET_LOOSE.map((controls) => spline(controls));
+
+/** 展开单编结的两根绳，再一起收紧。 */
 function sheetState(progress: number): LessonState {
-  const p = clamp(progress), tension = ease((p - .82) / .18)
-  const paths = tension > 0 ? SHEET_LOOSE.map((controls, cord) => spline(controls.map((point, i) => lerp(point, SHEET_TIGHT[cord]![i]!, tension)))) : sheetLoose
+  const p = clamp(progress),
+    tension = ease((p - 0.82) / 0.18);
+
+  const paths =
+    tension > 0
+      ? SHEET_LOOSE.map((controls, cord) =>
+          spline(controls.map((point, i) => lerp(point, SHEET_TIGHT[cord]![i]!, tension))),
+        )
+      : sheetLoose;
+
   const visible = paths.map((path, cord) => {
-    const loose = sheetLoose[cord]!
-    const cuts = cord === 0 ? [.55, loose.total, loose.total, loose.total, loose.total, loose.total]
-      : [.55, loose.marks[2]!, loose.marks[7]!, loose.marks[15]!, loose.total, loose.total]
-    return prefix(path, tension > 0 ? path.total : revealed(p, cuts))
-  })
-  return pairedState(visible, p)
+    const loose = sheetLoose[cord]!;
+    const cuts =
+      cord === 0
+        ? [0.55, loose.total, loose.total, loose.total, loose.total, loose.total]
+        : [0.55, loose.marks[2]!, loose.marks[7]!, loose.marks[15]!, loose.total, loose.total];
+
+    return prefix(path, tension > 0 ? path.total : revealed(p, cuts));
+  });
+
+  return pairedState(visible, p);
 }
+
+/** 合并蓝、红两根绳的画面。 */
 function pairedState(visible: Vec3[][], p: number): LessonState {
-  const points = visible[0]!
-  return { points, tip: [...points.at(-1)!], checkpoint: stepAt(p), radius: RADIUS, color: '#4d7798',
+  const points = visible[0]!;
+
+  return {
+    points,
+    tip: [...points.at(-1)!],
+    checkpoint: stepAt(p),
+    radius: RADIUS,
+    color: '#4d7798',
     endCaps: { start: '1B', end: '1A' },
-    strands: [{ id: 'join-red', points: visible[1]!, color: '#b76554', radius: RADIUS, label: '红绳', endCaps: { start: '2B', end: '2A' } }] }
-}
-
-// The blue overhand surrounds the red standing part; the second overhand
-// is its half-turn partner. Both slide together while their loop axes close.
-const FISHER_LOOSE: Vec3[][] = [
-  [
-    [2.7, -0.6828571, 0.0],
-    [2.0, -0.6828571, 0.0],
-    [1.3, -0.6828571, 0.0],
-    [0.5, -0.6828571, 0.0],
-    [-0.3, -0.6828571, 0.0],
-    [-1.2766074, -0.0177406, 0.3106809],
-    [-1.4992344, 0.1013345, -0.3756467],
-    [-1.6393254, 0.3050571, -0.5446873],
-    [-1.665326, 0.5502819, -0.4188525],
-    [-1.5713798, 0.7857339, -0.1604042],
-    [-1.3786475, 0.9516785, 0.1121421],
-    [-1.1305401, 1.0107381, 0.3122432],
-    [-0.8829418, 0.9496102, 0.3820704],
-    [-0.6916218, 0.7820632, 0.2933543],
-    [-0.5996733, 0.5458355, 0.0478204],
-    [-0.6278069, 0.3009948, -0.3244218],
-    [-0.7696857, 0.0984046, -0.7691064],
-    [-0.9933527, -0.0188782, -1.225571],
-    [-1.2504, -0.3116571, -1.1419429],
-    [-2.1064, -0.0332571, -1.0971429],
-    [-2.2072, 0.5351429, 0.9636571],
-    [-1.0664, 0.4583429, 0.9636571],
-    [-1.0664, 0.4583429, -1.3659429],
-    [-2.6, 0.9, -1.3659429],
-    [-2.6, -0.8, -0.8],
-    [-2.7, -1.05, 0.0],
-  ],
-  [
-    [-2.7, 0.6828571, 0.0],
-    [-2.0, 0.6828571, 0.0],
-    [-1.3, 0.6828571, 0.0],
-    [-0.5, 0.6828571, 0.0],
-    [0.3, 0.6828571, 0.0],
-    [1.2766074, 0.0177406, 0.3106809],
-    [1.4992344, -0.1013345, -0.3756467],
-    [1.6393254, -0.3050571, -0.5446873],
-    [1.665326, -0.5502819, -0.4188525],
-    [1.5713798, -0.7857339, -0.1604042],
-    [1.3786475, -0.9516785, 0.1121421],
-    [1.1305401, -1.0107381, 0.3122432],
-    [0.8829418, -0.9496102, 0.3820704],
-    [0.6916218, -0.7820632, 0.2933543],
-    [0.5996733, -0.5458355, 0.0478204],
-    [0.6278069, -0.3009948, -0.3244218],
-    [0.7696857, -0.0984046, -0.7691064],
-    [0.9933527, 0.0188782, -1.225571],
-    [1.2504, 0.3116571, -1.1419429],
-    [2.1064, 0.0332571, -1.0971429],
-    [2.2072, -0.5351429, 0.9636571],
-    [1.0664, -0.4583429, 0.9636571],
-    [1.0664, -0.4583429, -1.3659429],
-    [2.6, -0.9, -1.3659429],
-    [2.6, 0.8, -0.8],
-    [2.7, 1.05, 0.0],
-  ],
-]
-
-const FISHER_TIGHT: Vec3[][] = [
-  [
-    [2.7, -0.0650268, 0.0],
-    [2.0060257, -0.0654114, -7.3e-06],
-    [1.2350045, -0.0708615, -0.0044973],
-    [0.380194, -0.0812091, -0.0012182],
-    [0.0964108, -0.0697644, 0.0059955],
-    [0.0816848, -0.2305775, 0.0121369],
-    [-0.3025286, -0.1539851, -0.1130286],
-    [-0.2480677, 0.1127823, -0.1382788],
-    [-0.2385931, 0.1706522, -0.0981161],
-    [-0.2260668, 0.216977, -0.0287486],
-    [-0.2008745, 0.2104307, 0.0655056],
-    [-0.1733187, 0.1504549, 0.1325674],
-    [-0.1357629, 0.0844913, 0.1361386],
-    [-0.1066032, -0.0189764, 0.210592],
-    [-0.0483358, -0.1041913, 0.1526396],
-    [-0.0106911, -0.0608448, 0.0153317],
-    [-0.0070518, -0.0640102, -0.0653438],
-    [-0.0088665, -0.1207014, -0.149306],
-    [-0.0330773, -0.2479301, -0.1781314],
-    [-0.1302027, -0.3549708, -0.0648058],
-    [-0.183281, -0.2402635, 0.0922922],
-    [-0.145767, -0.0281162, 0.0465981],
-    [-0.109363, -0.0253056, -0.2158009],
-    [-0.3400824, -0.081994, -0.3038705],
-    [-1.7445472, -0.1992032, -0.1134605],
-    [-2.7, -0.2599579, 0.0],
-  ],
-  [
-    [-2.7, 0.0650268, 0.0],
-    [-2.0060257, 0.0654114, -7.3e-06],
-    [-1.2350045, 0.0708615, -0.0044973],
-    [-0.380194, 0.0812091, -0.0012182],
-    [-0.0964108, 0.0697644, 0.0059955],
-    [-0.0816848, 0.2305775, 0.0121369],
-    [0.3025286, 0.1539851, -0.1130286],
-    [0.2480677, -0.1127823, -0.1382788],
-    [0.2385931, -0.1706522, -0.0981161],
-    [0.2260668, -0.216977, -0.0287486],
-    [0.2008745, -0.2104307, 0.0655056],
-    [0.1733187, -0.1504549, 0.1325674],
-    [0.1357629, -0.0844913, 0.1361386],
-    [0.1066032, 0.0189764, 0.210592],
-    [0.0483358, 0.1041913, 0.1526396],
-    [0.0106911, 0.0608448, 0.0153317],
-    [0.0070518, 0.0640102, -0.0653438],
-    [0.0088665, 0.1207014, -0.149306],
-    [0.0330773, 0.2479301, -0.1781314],
-    [0.1302027, 0.3549708, -0.0648058],
-    [0.183281, 0.2402635, 0.0922922],
-    [0.145767, 0.0281162, 0.0465981],
-    [0.109363, 0.0253056, -0.2158009],
-    [0.3400824, 0.081994, -0.3038705],
-    [1.7445472, 0.1992032, -0.1134605],
-    [2.7, 0.2599579, 0.0],
-  ],
-]
-
-const fisherLoose = FISHER_LOOSE.map(controls => spline(controls))
-function fishermanState(progress: number): LessonState {
-  const p = clamp(progress), tension = ease((p - .82) / .18)
-  const paths = tension > 0 ? FISHER_LOOSE.map((controls, cord) => spline(controls.map((point, i) => lerp(point, FISHER_TIGHT[cord]![i]!, tension)))) : fisherLoose
-  const visible = paths.map((path, cord) => {
-    const loose = fisherLoose[cord]!
-    const cuts = cord === 0 ? [.55, loose.marks[4]!, loose.total, loose.total, loose.total, loose.total]
-      : [.55, loose.marks[4]!, loose.marks[4]!, loose.marks[20]!, loose.total, loose.total]
-    return prefix(path, tension > 0 ? path.total : revealed(p, cuts))
-  })
-  return pairedState(visible, p)
+    strands: [
+      {
+        id: 'join-red',
+        points: visible[1]!,
+        color: '#b76554',
+        radius: RADIUS,
+        label: '红绳',
+        endCaps: { start: '2B', end: '2A' },
+      },
+    ],
+  };
 }
 
 export const JOINT_KNOT_COURSES: Course[] = [
+  /** 单编结先摆蓝色绳弯，再让红绳绕双股并压回自身下方。 */
   {
-    id: 'sheet-bend', category: 'knots', name: '单编结', title: '穿入绳弯，绕过双股，再压到自身下方',
+    id: 'sheet-bend',
+    category: 'knots',
+    name: '单编结',
+    title: '穿入绳弯，绕过双股，再压到自身下方',
     description: '蓝绳形成一个绳弯，红绳绕过两股后扣住自身；最后检查两个工作端位于结的同一侧。',
-    material: '两根圆绳', materialNote: '本课用等径绳辨认结构。若绳子粗细不同，应由较粗的绳形成绳弯。仅作工艺结构教学。', duration: 30, initialProgress: .62,
-    steps: makeSteps(['折出蓝色绳弯', '红绳穿入绳弯', '绕过蓝绳两股', '压到红绳自身下方', '拉紧单编结'], [
-      '沿蓝绳 1A 折出绳弯；红绳 2A 是接下来穿绕的工作端。保持两股蓝绳清楚可见。',
-      '让红色工作端从蓝色绳弯内穿入，留出足够的绳尾。',
-      '依次从蓝绳的绳尾与固定段后方绕过，把两股一起圈住。',
-      '把红色工作端压到红绳自身下方穿出，不再穿回蓝色绳弯。',
-      '向外轻拉并整理四个绳段，让圈口贴合。蓝、红两个工作端应位于结的同一侧。',
-    ]), source: 'https://www.animatedknots.com/sheet-bend-knot', sourceName: 'Animated Knots · Sheet Bend',
+    material: '两根圆绳',
+    materialNote: '本课用等径绳辨认结构。若绳子粗细不同，应由较粗的绳形成绳弯。仅作工艺结构教学。',
+    duration: 30,
+    initialProgress: 0.62,
+    steps: makeSteps(
+      ['折出蓝色绳弯', '红绳穿入绳弯', '绕过蓝绳两股', '压到红绳自身下方', '拉紧单编结'],
+      [
+        '沿蓝绳 1A 折出绳弯；红绳 2A 是接下来穿绕的工作端。保持两股蓝绳清楚可见。',
+        '让红色工作端从蓝色绳弯内穿入，留出足够的绳尾。',
+        '依次从蓝绳的绳尾与固定段后方绕过，把两股一起圈住。',
+        '把红色工作端压到红绳自身下方穿出，不再穿回蓝色绳弯。',
+        '向外轻拉并整理四个绳段，让圈口贴合。蓝、红两个工作端应位于结的同一侧。',
+      ],
+    ),
+    source: 'https://www.animatedknots.com/sheet-bend-knot',
+    sourceName: 'Animated Knots · Sheet Bend',
     getState: sheetState,
   },
-  {
-    id: 'fishermans-knot', category: 'knots', name: '渔人结', title: '各自在对方主绳上打单结，再把两结拉拢',
-    description: '两根绳各打一个单结，分别套住对方的主绳；拉动两根主绳，让两个结芯相互贴住。',
-    material: '两根圆绳', materialNote: '本课展示单渔人结：每根绳各绕一次形成单结，区别于绕两圈的双渔人结。仅作工艺结构教学。', duration: 32, initialProgress: .62,
-    steps: makeSteps(['对向放置两根绳', '蓝端打一个单结', '红端绕蓝绳成圈', '红端穿圈并检查', '拉紧并靠拢两结'], [
-      '让两根绳的工作端朝向相反方向，先把两段主绳并排放好。',
-      '蓝色工作端 1A 绕住红色主绳，穿回自己的圈中，形成第一个单结。',
-      '红色工作端 2A 在另一侧绕住蓝色主绳，做出第二个单结的绳圈。',
-      '把红色工作端穿回红圈。检查两个单结都各自套住对方主绳，工作端分别朝外。',
-      '先整理两个单结，再向相反方向拉主绳 1B、2B，让两个结芯沿绳滑近并紧密相抵。',
-    ]), source: 'https://www.netknots.com/rope_knots/fishermans-knot', sourceName: 'NetKnots · Fisherman’s Knot',
-    getState: fishermanState,
-  },
-]
+  SINGLE_FISHERMAN_COURSE,
+];

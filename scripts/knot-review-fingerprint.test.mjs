@@ -24,6 +24,22 @@ test('浮点末位噪声不改变同一模型的验收版本', () => {
   assert.equal(knotReviewFingerprint(course()), knotReviewFingerprint(course(1e-12)));
 });
 
+test('正负舍入中点两侧的系统噪声保持同一指纹', () => {
+  for (const value of [0.2609375, -0.2609375, 3.2000285]) {
+    const fixture = (noise) => ({
+      ...course(),
+      getState: () => ({
+        points: [
+          [0, 0, 0],
+          [value + noise, 0, 0],
+        ],
+        radius: 0.01,
+      }),
+    });
+    assert.equal(knotReviewFingerprint(fixture(-2.3e-13)), knotReviewFingerprint(fixture(2.3e-13)));
+  }
+});
+
 test('字段插入顺序不改变含义，数组动作顺序仍被保留', () => {
   const original = course();
   const reordered = { getState: original.getState, steps: original.steps, id: original.id };
